@@ -10,8 +10,8 @@ using System.Linq;
 using System.Threading;
 using Microsoft.AspNet.SignalR.Configuration;
 using Microsoft.AspNet.SignalR.Infrastructure;
-using Microsoft.Framework.DependencyInjection;
 using Microsoft.Framework.Logging;
+using Microsoft.Framework.OptionsModel;
 
 namespace Microsoft.AspNet.SignalR.Transports
 {
@@ -22,10 +22,8 @@ namespace Microsoft.AspNet.SignalR.Transports
     {
         private readonly ConcurrentDictionary<string, ConnectionMetadata> _connections = new ConcurrentDictionary<string, ConnectionMetadata>();
         private readonly Timer _timer;
-        private readonly IConfigurationManager _configurationManager;
-        private readonly IServerCommandHandler _serverCommandHandler;
+        private readonly TransportOptions _transportOptions;
         private readonly ILogger _logger;
-        private readonly string _serverId;
         private readonly IPerformanceCounterManager _counters;
         private readonly object _counterLock = new object();
 
@@ -36,23 +34,19 @@ namespace Microsoft.AspNet.SignalR.Transports
         /// Initializes and instance of the <see cref="TransportHeartbeat"/> class.
         /// </summary>
         /// <param name="serviceProvider">The <see cref="IDependencyResolver"/>.</param>
-        public TransportHeartbeat(IServiceProvider serviceProvider)
+        public TransportHeartbeat(IOptions<SignalROptions> optionsAccessor,
+                                  IPerformanceCounterManager counters,
+                                  ILoggerFactory loggerFactory)
         {
-            _configurationManager = serviceProvider.GetService<IConfigurationManager>();
-            _serverCommandHandler = serviceProvider.GetService<IServerCommandHandler>();
-            _serverId = serviceProvider.GetService<IServerIdManager>().ServerId;
-            _counters = serviceProvider.GetService<IPerformanceCounterManager>();
-
-            var loggerFactory = serviceProvider.GetService<ILoggerFactory>();
+            _transportOptions = optionsAccessor.Options.Transports;
+            _counters = counters;
             _logger = loggerFactory.Create("SignalR.Transports.TransportHeartBeat");
-
-            _serverCommandHandler.Command = ProcessServerCommand;
 
             // REVIEW: When to dispose the timer?
             _timer = new Timer(Beat,
                                null,
-                               _configurationManager.HeartbeatInterval(),
-                               _configurationManager.HeartbeatInterval());
+                               _transportOptions.HeartbeatInterval(),
+                               _transportOptions.HeartbeatInterval());
         }
 
         private ILogger Logger
@@ -63,31 +57,6 @@ namespace Microsoft.AspNet.SignalR.Transports
             }
         }
 
-
-        private void ProcessServerCommand(ServerCommand command)
-        {
-            switch (command.ServerCommandType)
-            {
-                case ServerCommandType.RemoveConnection:
-                    // Only remove connections if this command didn't originate from the owner
-                    if (!command.IsFromSelf(_serverId))
-                    {
-                        var connectionId = (string)command.Value;
-
-                        // Remove the connection
-                        ConnectionMetadata metadata;
-                        if (_connections.TryGetValue(connectionId, out metadata))
-                        {
-                            metadata.Connection.End();
-
-                            RemoveConnection(metadata.Connection);
-                        }
-                    }
-                    break;
-                default:
-                    break;
-            }
-        }
 
         /// <summary>
         /// Adds a new connection to the list of tracked connections.
@@ -256,7 +225,7 @@ namespace Microsoft.AspNet.SignalR.Transports
                     Logger.WriteVerbose("KeepAlive(" + metadata.Connection.ConnectionId + ")");
 
                     // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
-                    metadata.Connection.KeepAlive().Catch((ex, state) => OnKeepAliveError(ex, state), Logger);
+                    metadata.Connection.KeepAlive().Catch((ex, state) => OnKeepAliveError(ex, state), state: Logger, logger: Logger);
                 }
 
                 MarkConnection(metadata.Connection);
@@ -292,14 +261,14 @@ namespace Microsoft.AspNet.SignalR.Transports
             TimeSpan elapsed = DateTime.UtcNow - metadata.LastMarked;
 
             // The threshold for disconnect is the transport threshold + (potential network issues)
-            var threshold = metadata.Connection.DisconnectThreshold + _configurationManager.DisconnectTimeout;
+            var threshold = metadata.Connection.DisconnectThreshold + _transportOptions.DisconnectTimeout;
 
             return elapsed >= threshold;
         }
 
         private bool RaiseKeepAlive(ConnectionMetadata metadata)
         {
-            var keepAlive = _configurationManager.KeepAlive;
+            var keepAlive = _transportOptions.KeepAlive;
 
             // Don't raise keep alive if it's set to 0 or the transport doesn't support
             // keep alive
@@ -309,7 +278,7 @@ namespace Microsoft.AspNet.SignalR.Transports
             }
 
             // Raise keep alive if the keep alive value has passed
-            return _heartbeatCount % (ulong)ConfigurationExtensions.HeartBeatsPerKeepAlive == 0;
+            return _heartbeatCount % (ulong)TransportOptionsExtensions.HeartBeatsPerKeepAlive == 0;
         }
 
         private bool RaiseTimeout(ConnectionMetadata metadata)
@@ -320,10 +289,10 @@ namespace Microsoft.AspNet.SignalR.Transports
                 return false;
             }
 
-            var keepAlive = _configurationManager.KeepAlive;
-            // If keep alive is configured and the connection supports keep alive
-            // don't ever time out
-            if (keepAlive != null && metadata.Connection.SupportsKeepAlive)
+            // If keep alives are enabled and the transport doesn't require timeouts,
+            // i.e. anything but long-polling, don't ever timeout.
+            var keepAlive = _transportOptions.KeepAlive;
+            if (keepAlive != null && !metadata.Connection.RequiresTimeout)
             {
                 return false;
             }
@@ -331,7 +300,7 @@ namespace Microsoft.AspNet.SignalR.Transports
             TimeSpan elapsed = DateTime.UtcNow - metadata.Initial;
 
             // Only raise timeout if we're past the configured connection timeout.
-            return elapsed >= _configurationManager.ConnectionTimeout;
+            return elapsed >= _transportOptions.LongPolling.PollTimeout;
         }
 
         protected virtual void Dispose(bool disposing)

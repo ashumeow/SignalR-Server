@@ -3,6 +3,7 @@
 
 
 using System;
+using Microsoft.AspNet.Http;
 
 namespace Microsoft.AspNet.SignalR.Infrastructure
 {
@@ -11,9 +12,10 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         private const string ProtocolQueryParameter = "clientProtocol";
         private readonly Version _minSupportedProtocol;
         private readonly Version _maxSupportedProtocol;
+        private readonly Version _minimumDelayedStartVersion = new Version(1, 4);
 
         public ProtocolResolver() :
-            this(new Version(1, 2), new Version(1, 3))
+            this(new Version(1, 2), new Version(1, 5))
         {
         }
 
@@ -23,7 +25,7 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
             _maxSupportedProtocol = max;
         }
 
-        public Version Resolve(IRequest request)
+        public Version Resolve(HttpRequest request)
         {
             if (request == null)
             {
@@ -32,7 +34,7 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
 
             Version clientProtocol;
 
-            if (Version.TryParse(request.QueryString[ProtocolQueryParameter], out clientProtocol))
+            if (Version.TryParse(request.Query[ProtocolQueryParameter], out clientProtocol))
             {
                 if (clientProtocol > _maxSupportedProtocol)
                 {
@@ -45,6 +47,11 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
             }
 
             return clientProtocol ?? _minSupportedProtocol;
+        }
+
+        public bool SupportsDelayedStart(HttpRequest request)
+        {
+            return Resolve(request) >= _minimumDelayedStartVersion;
         }
     }
 }

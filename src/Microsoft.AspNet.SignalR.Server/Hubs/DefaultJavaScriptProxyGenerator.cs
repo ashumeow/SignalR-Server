@@ -11,7 +11,6 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using Microsoft.AspNet.SignalR.Json;
-using Microsoft.Framework.DependencyInjection;
 using Newtonsoft.Json;
 
 namespace Microsoft.AspNet.SignalR.Hubs
@@ -23,7 +22,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
         private static readonly Type[] _numberTypes = new[] { typeof(byte), typeof(short), typeof(int), typeof(long), typeof(float), typeof(decimal), typeof(double) };
         private static readonly Type[] _dateTypes = new[] { typeof(DateTime), typeof(DateTimeOffset) };
 
-        private const string ScriptResource = "hubs.js";
+        private const string ScriptResource = "Scripts/hubs.js";
 
         private readonly IHubManager _manager;
         private readonly IJavaScriptMinifier _javaScriptMinifier;
@@ -32,7 +31,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
         public DefaultJavaScriptProxyGenerator(IHubManager manager, IJavaScriptMinifier javaScriptMinifier)
         {
             _manager = manager;
-            _javaScriptMinifier = javaScriptMinifier ?? NullJavaScriptMinifier.Instance;
+            _javaScriptMinifier = javaScriptMinifier;
             _generatedTemplate = new Lazy<string>(() => GenerateProxy(_manager, _javaScriptMinifier, includeDocComments: false));
         }
 

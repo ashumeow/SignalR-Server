@@ -4,20 +4,16 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Configuration;
 using Microsoft.AspNet.SignalR.Infrastructure;
-using Microsoft.Framework.DependencyInjection;
 using Microsoft.Framework.Logging;
+using Microsoft.Framework.OptionsModel;
 
 namespace Microsoft.AspNet.SignalR.Messaging
 {
-    /// <summary>
-    /// 
-    /// </summary>
     public class MessageBus : IMessageBus, IDisposable
     {
         private readonly MessageBroker _broker;
@@ -51,38 +47,17 @@ namespace Microsoft.AspNet.SignalR.Messaging
         internal Action<string, Topic> AfterTopicMarkedSuccessfully;
         internal Action<string, Topic, int> AfterTopicMarked;
 
-        private const int DefaultMaxTopicsWithNoSubscriptions = 1000;
-
         private readonly Func<string, Topic> _createTopic;
         private readonly Action<ISubscriber, string> _addEvent;
         private readonly Action<ISubscriber, string> _removeEvent;
         private readonly Action<object> _disposeSubscription;
 
-        /// <summary>
-        /// 
-        /// </summary>
-        /// <param name="serviceProvider"></param>
-        public MessageBus(IServiceProvider serviceProvider)
-            : this(serviceProvider.GetService<IStringMinifier>(),
-                   serviceProvider.GetService<ILoggerFactory>(),
-                   serviceProvider.GetService<IPerformanceCounterManager>(),
-                   serviceProvider.GetService<IConfigurationManager>())
-        {
-        }
 
-        /// <summary>
-        /// 
-        /// </summary>
-        /// <param name="stringMinifier"></param>
-        /// <param name="traceManager"></param>
-        /// <param name="performanceCounterManager"></param>
-        /// <param name="configurationManager"></param>
-        /// <param name="maxTopicsWithNoSubscriptions"></param>
         [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope", Justification = "The message broker is disposed when the bus is disposed.")]
-        private MessageBus(IStringMinifier stringMinifier,
-                           ILoggerFactory loggerFactory,
-                           IPerformanceCounterManager performanceCounterManager,
-                           IConfigurationManager configurationManager)
+        public MessageBus(IStringMinifier stringMinifier,
+                          ILoggerFactory loggerFactory,
+                          IPerformanceCounterManager performanceCounterManager,
+                          IOptions<SignalROptions> optionsAccessor)
         {
             if (stringMinifier == null)
             {
@@ -99,12 +74,14 @@ namespace Microsoft.AspNet.SignalR.Messaging
                 throw new ArgumentNullException("performanceCounterManager");
             }
 
-            if (configurationManager == null)
+            if (optionsAccessor == null)
             {
-                throw new ArgumentNullException("configurationManager");
+                throw new ArgumentNullException("optionsAccessor");
             }
 
-            if (configurationManager.DefaultMessageBufferSize < 0)
+            var options = optionsAccessor.Options;
+
+            if (options.MessageBus.MessageBufferSize < 0)
             {
                 throw new ArgumentOutOfRangeException(Resources.Error_BufferSizeOutOfRange);
             }
@@ -113,7 +90,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
             _loggerFactory = loggerFactory;
             Counters = performanceCounterManager;
             _logger = _loggerFactory.Create("SignalR." + typeof(MessageBus).Name);
-            _maxTopicsWithNoSubscriptions = configurationManager.DefaultMaxTopicsWithNoSubscriptions;
+            _maxTopicsWithNoSubscriptions = options.MessageBus.MaxTopicsWithNoSubscriptions;
 
             _gcTimer = new Timer(_ => GarbageCollectTopics(), state: null, dueTime: _gcInterval, period: _gcInterval);
 
@@ -123,23 +100,15 @@ namespace Microsoft.AspNet.SignalR.Messaging
             };
 
             // The default message store size
-            _messageStoreSize = (uint)configurationManager.DefaultMessageBufferSize;
+            _messageStoreSize = (uint)options.MessageBus.MessageBufferSize;
 
-            _topicTtl = configurationManager.TopicTtl();
+            _topicTtl = options.Transports.TopicTtl();
             _createTopic = CreateTopic;
             _addEvent = AddEvent;
             _removeEvent = RemoveEvent;
             _disposeSubscription = o => DisposeSubscription(o);
 
             Topics = new TopicLookup();
-        }
-
-        protected virtual ILogger Logger
-        {
-            get
-            {
-                return _logger;
-            }
         }
 
         protected internal TopicLookup Topics { get; private set; }
@@ -303,13 +272,13 @@ namespace Microsoft.AspNet.SignalR.Messaging
 
         protected virtual void Dispose(bool disposing)
         {
-            if (disposing)
+            if (disposing && _gcRunning != GCState.Disposed)
             {
                 // Stop the broker from doing any work
                 _broker.Dispose();
 
                 // Spin while we wait for the timer to finish if it's currently running
-                while (Interlocked.Exchange(ref _gcRunning, 1) == 1)
+                while (Interlocked.CompareExchange(ref _gcRunning, GCState.Disposed, GCState.Idle) == GCState.Running)
                 {
                     Thread.Sleep(250);
                 }
@@ -331,7 +300,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
 
         internal void GarbageCollectTopics()
         {
-            if (Interlocked.Exchange(ref _gcRunning, 1) == 1)
+            if (Interlocked.CompareExchange(ref _gcRunning, GCState.Running, GCState.Idle) != GCState.Idle)
             {
                 return;
             }
@@ -387,7 +356,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
                 }
             }
 
-            Interlocked.Exchange(ref _gcRunning, 0);
+            Interlocked.CompareExchange(ref _gcRunning, GCState.Idle, GCState.Running);
         }
 
         private void DestroyTopic(string key, Topic topic)
@@ -416,7 +385,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
 
             Counters.MessageBusTopicsCurrent.Decrement();
 
-            Logger.WriteInformation("RemoveTopic(" + key + ")");
+            _logger.WriteInformation("RemoveTopic(" + key + ")");
 
             if (AfterTopicGarbageCollected != null)
             {
@@ -568,6 +537,13 @@ namespace Microsoft.AspNet.SignalR.Messaging
                 Initialized = new ManualResetEventSlim();
                 Subscriber = subscriber;
             }
+        }
+
+        private static class GCState
+        {
+            public const int Idle = 0;
+            public const int Running = 1;
+            public const int Disposed = 2;
         }
     }
 }

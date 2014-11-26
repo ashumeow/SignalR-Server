@@ -9,9 +9,8 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Infrastructure;
-using Microsoft.Framework.DependencyInjection;
 using Microsoft.Framework.Logging;
-
+using Microsoft.Framework.OptionsModel;
 
 namespace Microsoft.AspNet.SignalR.Messaging
 {
@@ -26,18 +25,16 @@ namespace Microsoft.AspNet.SignalR.Messaging
         private readonly Lazy<ScaleoutStreamManager> _streamManager;
         private readonly IPerformanceCounterManager _perfCounters;
 
-        protected ScaleoutMessageBus(IServiceProvider serviceProvider, ScaleoutConfiguration configuration)
-            : base(serviceProvider)
+        protected ScaleoutMessageBus(IStringMinifier stringMinifier,
+                                     ILoggerFactory loggerFactory,
+                                     IPerformanceCounterManager performanceCounterManager,
+                                     IOptions<SignalROptions> optionsAccessor,
+                                     IOptions<ScaleoutConfiguration> scaleoutConfigurationAccessor)
+            : base(stringMinifier, loggerFactory, performanceCounterManager, optionsAccessor)
         {
-            if (configuration == null)
-            {
-                throw new ArgumentNullException("configuration");
-            }
-
-            var loggerFactory = serviceProvider.GetService<ILoggerFactory>();
             _logger = loggerFactory.Create("SignalR." + typeof(ScaleoutMessageBus).Name);
-            _perfCounters = serviceProvider.GetService<IPerformanceCounterManager>();
-            _streamManager = new Lazy<ScaleoutStreamManager>(() => new ScaleoutStreamManager(Send, OnReceivedCore, StreamCount, _logger, _perfCounters, configuration));
+            _perfCounters = performanceCounterManager;
+            _streamManager = new Lazy<ScaleoutStreamManager>(() => new ScaleoutStreamManager(Send, OnReceivedCore, StreamCount, _logger, _perfCounters, scaleoutConfigurationAccessor.Options));
         }
 
         /// <summary>
@@ -133,7 +130,7 @@ namespace Microsoft.AspNet.SignalR.Messaging
 
                 Debug.Assert(index >= 0, "Hash function resulted in an index < 0.");
 
-                Task sendTask = StreamManager.Send(index, group.ToArray()).Catch();
+                Task sendTask = StreamManager.Send(index, group.ToArray()).Catch(_logger);
 
                 if (sendTask.IsCompleted)
                 {

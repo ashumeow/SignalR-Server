@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.AspNet.Http;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
@@ -56,7 +57,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
             _methodInvocationAuthorizersCache = new ConcurrentDictionary<MethodDescriptor, IEnumerable<IAuthorizeHubMethodInvocation>>();
         }
 
-        public override Func<HubDescriptor, IRequest, bool> BuildAuthorizeConnect(Func<HubDescriptor, IRequest, bool> authorizeConnect)
+        public override Func<HubDescriptor, HttpRequest, bool> BuildAuthorizeConnect(Func<HubDescriptor, HttpRequest, bool> authorizeConnect)
         {
             return base.BuildAuthorizeConnect((hubDescriptor, request) =>
             {

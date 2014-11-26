@@ -8,6 +8,7 @@ using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Security.Principal;
+using Microsoft.AspNet.Http;
 using Microsoft.AspNet.SignalR.Hubs;
 
 namespace Microsoft.AspNet.SignalR
@@ -74,7 +75,7 @@ namespace Microsoft.AspNet.SignalR
         /// <param name="hubDescriptor">Description of the hub client is attempting to connect to.</param>
         /// <param name="request">The (re)connect request from the client.</param>
         /// <returns>true if the caller is authorized to connect to the hub; otherwise, false.</returns>
-        public virtual bool AuthorizeHubConnection(HubDescriptor hubDescriptor, IRequest request)
+        public virtual bool AuthorizeHubConnection(HubDescriptor hubDescriptor, HttpRequest request)
         {
             if (request == null)
             {
@@ -87,7 +88,7 @@ namespace Microsoft.AspNet.SignalR
                 return true;
             }
 
-            return UserAuthorized(request.User);
+            return UserAuthorized(request.HttpContext.User);
         }
 
         /// <summary>

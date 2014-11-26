@@ -3,13 +3,12 @@
 
 
 using System;
-using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNet.SignalR.Hosting;
-using Microsoft.AspNet.SignalR.Http;
+using Microsoft.AspNet.Hosting;
+using Microsoft.AspNet.Http;
 using Microsoft.AspNet.SignalR.Infrastructure;
 using Microsoft.Framework.Logging;
 
@@ -19,7 +18,7 @@ namespace Microsoft.AspNet.SignalR.Transports
     [SuppressMessage("Microsoft.Design", "CA1001:TypesThatOwnDisposableFieldsShouldBeDisposable", Justification = "Disposable fields are disposed from a different method")]
     public abstract class TransportDisconnectBase : ITrackingConnection
     {
-        private readonly HostContext _context;
+        private readonly HttpContext _context;
         private readonly ITransportHeartbeat _heartbeat;
         private TextWriter _outputWriter;
 
@@ -29,6 +28,9 @@ namespace Microsoft.AspNet.SignalR.Transports
         private readonly IPerformanceCounterManager _counters;
         private int _ended;
         private TransportConnectionStates _state;
+
+        [SuppressMessage("Microsoft.Design", "CA1051:DoNotDeclareVisibleInstanceFields", Justification = "It can be set in any derived class.")]
+        protected string _lastMessageId;
 
         internal static readonly Func<Task> _emptyTaskFunc = () => TaskAsyncHelper.Empty;
 
@@ -48,7 +50,7 @@ namespace Microsoft.AspNet.SignalR.Transports
 
         internal HttpRequestLifeTime _requestLifeTime;
 
-        protected TransportDisconnectBase(HostContext context, ITransportHeartbeat heartbeat, IPerformanceCounterManager performanceCounterManager, ILoggerFactory loggerFactory)
+        protected TransportDisconnectBase(HttpContext context, ITransportHeartbeat heartbeat, IPerformanceCounterManager performanceCounterManager, IApplicationLifetime applicationLifetime, ILoggerFactory loggerFactory, IMemoryPool pool)
         {
             if (context == null)
             {
@@ -65,19 +67,29 @@ namespace Microsoft.AspNet.SignalR.Transports
                 throw new ArgumentNullException("performanceCounterManager");
             }
 
+            if (applicationLifetime == null)
+            {
+                throw new ArgumentNullException("applicationLifetime");
+            }
+
             if (loggerFactory == null)
             {
                 throw new ArgumentNullException("loggerFactory");
             }
 
+            Pool = pool;
+
             _context = context;
             _heartbeat = heartbeat;
             _counters = performanceCounterManager;
+            _hostShutdownToken = applicationLifetime.ApplicationStopping;
 
             // Queue to protect against overlapping writes to the underlying response stream
             WriteQueue = new TaskQueue();
             _logger = loggerFactory.Create("SignalR.Transports." + GetType().Name);
         }
+
+        protected IMemoryPool Pool { get; private set; }
 
         protected ILogger Logger
         {
@@ -93,33 +105,39 @@ namespace Microsoft.AspNet.SignalR.Transports
             set;
         }
 
-        public virtual TextWriter OutputWriter
+        protected string LastMessageId
         {
             get
             {
-                if (_outputWriter == null)
-                {
-                    _outputWriter = CreateResponseWriter();
-                    _outputWriter.NewLine = "\n";
-                }
-
-                return _outputWriter;
+                return _lastMessageId;
             }
         }
 
+        protected virtual Task InitializeMessageId()
+        {
+            _lastMessageId = Context.Request.Query["messageId"];
+            return TaskAsyncHelper.Empty;
+        }
+
+        [SuppressMessage("Microsoft.Design", "CA1024:UsePropertiesWhereAppropriate", Justification = "This is for async.")]
+        public virtual Task<string> GetGroupsToken()
+        {
+            return TaskAsyncHelper.FromResult(Context.Request.Query["groupsToken"]);
+        }
+        
         internal TaskQueue WriteQueue
         {
             get;
             set;
         }
 
-        public Func<Task> Disconnected { get; set; }
+        public Func<bool, Task> Disconnected { get; set; }
 
         public virtual CancellationToken CancellationToken
         {
             get
             {
-                return _context.Response.CancellationToken;
+                return _context.RequestAborted;
             }
         }
 
@@ -129,11 +147,11 @@ namespace Microsoft.AspNet.SignalR.Transports
             {
                 // If the CTS is tripped or the request has ended then the connection isn't alive
                 return !(
-                     CancellationToken.IsCancellationRequested ||
-                     (_requestLifeTime != null && _requestLifeTime.Task.IsCompleted) ||
-                     _lastWriteTask.IsCanceled ||
-                     _lastWriteTask.IsFaulted
-                 );
+                    CancellationToken.IsCancellationRequested ||
+                    (_requestLifeTime != null && _requestLifeTime.Task.IsCompleted) ||
+                    _lastWriteTask.IsCanceled ||
+                    _lastWriteTask.IsFaulted
+                );
             }
         }
 
@@ -177,16 +195,32 @@ namespace Microsoft.AspNet.SignalR.Transports
             }
         }
 
+        public virtual bool RequiresTimeout
+        {
+            get
+            {
+                return false;
+            }
+        }
+
         public virtual TimeSpan DisconnectThreshold
         {
             get { return TimeSpan.FromSeconds(5); }
         }
 
-        public virtual bool IsConnectRequest
+        protected bool IsConnectRequest
         {
             get
             {
-                return Context.Request.LocalPath.EndsWith("/connect", StringComparison.OrdinalIgnoreCase);
+                return Context.Request.LocalPath().EndsWith("/connect", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        protected bool IsSendRequest
+        {
+            get
+            {
+                return Context.Request.LocalPath().EndsWith("/send", StringComparison.OrdinalIgnoreCase);
             }
         }
 
@@ -194,13 +228,21 @@ namespace Microsoft.AspNet.SignalR.Transports
         {
             get
             {
-                return Context.Request.LocalPath.EndsWith("/abort", StringComparison.OrdinalIgnoreCase);
+                return Context.Request.LocalPath().EndsWith("/abort", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        protected virtual bool SuppressReconnect
+        {
+            get
+            {
+                return false;
             }
         }
 
         protected ITransportConnection Connection { get; set; }
 
-        protected HostContext Context
+        protected HttpContext Context
         {
             get { return _context; }
         }
@@ -208,11 +250,6 @@ namespace Microsoft.AspNet.SignalR.Transports
         protected ITransportHeartbeat Heartbeat
         {
             get { return _heartbeat; }
-        }
-
-        protected virtual TextWriter CreateResponseWriter()
-        {
-            return new BinaryTextWriter(Context.Response);
         }
 
         protected void IncrementErrors()
@@ -225,16 +262,15 @@ namespace Microsoft.AspNet.SignalR.Transports
 
         public Task Disconnect()
         {
-            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
-            return Abort(clean: false).Then(transport => transport.Connection.Close(transport.ConnectionId), this);
+            return Abort(clean: false);
         }
 
-        public Task Abort()
+        protected Task Abort()
         {
             return Abort(clean: true);
         }
 
-        public Task Abort(bool clean)
+        private Task Abort(bool clean)
         {
             if (clean)
             {
@@ -255,11 +291,16 @@ namespace Microsoft.AspNet.SignalR.Transports
             // End the connection
             End();
 
-            var disconnected = Disconnected ?? _emptyTaskFunc;
+            var disconnectTask = Disconnected != null ? Disconnected(clean) : TaskAsyncHelper.Empty;
 
             // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
-            return disconnected().Catch((ex, state) => OnDisconnectError(ex, state), Logger)
-                                 .Then(counters => counters.ConnectionsDisconnected.Increment(), _counters);
+            return disconnectTask
+                .Catch((ex, state) => OnDisconnectError(ex, state), state: Logger, logger: Logger)
+                .Finally(state =>
+                {
+                    var counters = (IPerformanceCounterManager)state;
+                    counters.ConnectionsDisconnected.Increment();
+                }, _counters);
         }
 
         public void ApplyState(TransportConnectionStates states)
@@ -313,7 +354,7 @@ namespace Microsoft.AspNet.SignalR.Transports
             }
         }
 
-        protected virtual internal Task EnqueueOperation(Func<Task> writeAsync)
+        protected internal Task EnqueueOperation(Func<Task> writeAsync)
         {
             return EnqueueOperation(state => ((Func<Task>)state).Invoke(), writeAsync);
         }
@@ -328,14 +369,12 @@ namespace Microsoft.AspNet.SignalR.Transports
             // Only enqueue new writes if the connection is alive
             Task writeTask = WriteQueue.Enqueue(writeAsync, state);
             _lastWriteTask = writeTask;
+
             return writeTask;
         }
 
-        protected virtual void InitializePersistentState()
+        protected virtual Task InitializePersistentState()
         {
-            // TODO: Host shutdown token
-            _hostShutdownToken = CancellationToken.None; //_context.Environment.GetShutdownToken();
-
             _requestLifeTime = new HttpRequestLifeTime(this, WriteQueue, Logger, ConnectionId);
 
             // Create the TCS that completes when the task returned by PersistentConnection.OnConnected does.
@@ -358,6 +397,8 @@ namespace Microsoft.AspNet.SignalR.Transports
                 ((HttpRequestLifeTime)state).Complete();
             },
             _requestLifeTime);
+
+            return InitializeMessageId();
         }
 
         private static void OnDisconnectError(AggregateException ex, object state)

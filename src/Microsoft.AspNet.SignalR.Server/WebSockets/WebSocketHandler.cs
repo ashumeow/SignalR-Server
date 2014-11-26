@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Open Technologies, Inc. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
-#if NET45
 
 using System;
 using System.Diagnostics;
@@ -11,10 +10,11 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.Framework.Logging;
 
 namespace Microsoft.AspNet.SignalR.WebSockets
 {
-    public class WebSocketHandler
+    public abstract class WebSocketHandler
     {
         // Wait 250 ms before giving up on a Close
         private static readonly TimeSpan _closeTimeout = TimeSpan.FromMilliseconds(250);
@@ -23,12 +23,15 @@ namespace Microsoft.AspNet.SignalR.WebSockets
         private const int _receiveLoopBufferSize = 4 * 1024;
         private readonly int? _maxIncomingMessageSize;
 
+        private readonly ILogger _logger;
+
         // Queue for sending messages
         private readonly TaskQueue _sendQueue = new TaskQueue();
 
-        public WebSocketHandler(int? maxIncomingMessageSize)
+        protected WebSocketHandler(int? maxIncomingMessageSize, ILogger logger)
         {
             _maxIncomingMessageSize = maxIncomingMessageSize;
+            _logger = logger;
         }
 
         public virtual void OnOpen() { }
@@ -41,24 +44,12 @@ namespace Microsoft.AspNet.SignalR.WebSockets
 
         public virtual void OnClose() { }
 
-        // Sends a text message to the client
-        public virtual Task Send(string message)
-        {
-            if (message == null)
-            {
-                throw new ArgumentNullException("message");
-            }
-
-            return SendAsync(message);
-        }
-
-        internal Task SendAsync(string message)
+        public Task SendAsync(string message)
         {
             var buffer = Encoding.UTF8.GetBytes(message);
             return SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text);
         }
 
-        [System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Design", "CA1026:DefaultParametersShouldNotBeUsed")]
         public virtual Task SendAsync(ArraySegment<byte> message, WebSocketMessageType messageType, bool endOfMessage = true)
         {
             if (WebSocket.State != WebSocketState.Open)
@@ -79,12 +70,14 @@ namespace Microsoft.AspNet.SignalR.WebSockets
 
                 try
                 {
-                    await context.Handler.WebSocket.SendAsync(context.Message, context.MessageType, context.EndOfMessage, CancellationToken.None);
+                    await context.Handler.WebSocket
+                          .SendAsync(context.Message, context.MessageType, context.EndOfMessage, CancellationToken.None)
+                          .PreserveCulture();
                 }
                 catch (Exception ex)
                 {
                     // Swallow exceptions on send
-                    Trace.TraceError("Error while sending: " + ex);
+                    _logger.WriteError("Error while sending: " + ex);
                 }
             },
             sendContext);
@@ -110,12 +103,14 @@ namespace Microsoft.AspNet.SignalR.WebSockets
 
                 try
                 {
-                    await context.Handler.WebSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+                    await context.Handler.WebSocket
+                        .CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None)
+                        .PreserveCulture();
                 }
                 catch (Exception ex)
                 {
                     // Swallow exceptions on close
-                    Trace.TraceError("Error while closing the websocket: " + ex);
+                    _logger.WriteError("Error while closing the websocket: " + ex);
                 }
             },
             closeContext);
@@ -133,7 +128,7 @@ namespace Microsoft.AspNet.SignalR.WebSockets
 
         public Exception Error { get; set; }
 
-        public Task ProcessWebSocketRequestAsync(WebSocket webSocket, CancellationToken disconnectToken)
+        internal Task ProcessWebSocketRequestAsync(WebSocket webSocket, CancellationToken disconnectToken)
         {
             if (webSocket == null)
             {
@@ -164,7 +159,7 @@ namespace Microsoft.AspNet.SignalR.WebSockets
                 // dispatch incoming messages
                 while (!disconnectToken.IsCancellationRequested && !closedReceived)
                 {
-                    WebSocketMessage incomingMessage = await messageRetriever(state);
+                    WebSocketMessage incomingMessage = await messageRetriever(state).PreserveCulture();
                     switch (incomingMessage.MessageType)
                     {
                         case WebSocketMessageType.Binary:
@@ -181,7 +176,7 @@ namespace Microsoft.AspNet.SignalR.WebSockets
                             // If we received an incoming CLOSE message, we'll queue a CLOSE frame to be sent.
                             // We'll give the queued frame some amount of time to go out on the wire, and if a
                             // timeout occurs we'll give up and abort the connection.
-                            await Task.WhenAny(CloseAsync(), Task.Delay(_closeTimeout));
+                            await Task.WhenAny(CloseAsync(), Task.Delay(_closeTimeout)).PreserveCulture();
                             break;
                     }
                 }
@@ -219,7 +214,7 @@ namespace Microsoft.AspNet.SignalR.WebSockets
                 else
                 {
                     // Close the socket
-                    await WebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+                    await WebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None).PreserveCulture();
                 }
             }
             finally
@@ -231,6 +226,7 @@ namespace Microsoft.AspNet.SignalR.WebSockets
         // returns true if this is a fatal exception (e.g. OnError should be called)
         private static bool IsFatalException(Exception ex)
         {
+#if ASPNET50
             // If this exception is due to the underlying TCP connection going away, treat as a normal close
             // rather than a fatal exception.
             COMException ce = ex as COMException;
@@ -245,7 +241,7 @@ namespace Microsoft.AspNet.SignalR.WebSockets
                         return false;
                 }
             }
-
+#endif
             // unknown exception; treat as fatal
             return true;
         }
@@ -300,4 +296,3 @@ namespace Microsoft.AspNet.SignalR.WebSockets
         }
     }
 }
-#endif

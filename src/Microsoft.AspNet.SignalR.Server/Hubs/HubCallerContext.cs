@@ -14,12 +14,12 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <summary>
         /// Gets the connection id of the calling client.
         /// </summary>
-        public string ConnectionId { get; private set; }
+        public virtual string ConnectionId { get; private set; }
 
         /// <summary>
         /// Gets the cookies for the request.
         /// </summary>
-        public IReadableStringCollection RequestCookies
+        public virtual IReadableStringCollection RequestCookies
         {
             get
             {
@@ -30,7 +30,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <summary>
         /// Gets the headers for the request.
         /// </summary>
-        public IReadableStringCollection Headers
+        public virtual IReadableStringCollection Headers
         {
             get
             {
@@ -41,31 +41,37 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <summary>
         /// Gets the querystring for the request.
         /// </summary>
-        public IReadableStringCollection QueryString
+        public virtual IReadableStringCollection QueryString
         {
             get
             {
-                return Request.QueryString;
+                return Request.Query;
             }
         }
 
         /// <summary>
         /// Gets the <see cref="IPrincipal"/> for the request.
         /// </summary>
-        public IPrincipal User
+        public virtual IPrincipal User
         {
             get
             {
-                return Request.User;
+                return Request.HttpContext.User;
             }
         }
 
         /// <summary>
-        /// Gets the <see cref="IRequest"/> for the current HTTP request.
+        /// Gets the <see cref="HttpRequest"/> for the current HTTP request.
         /// </summary>
-        public IRequest Request { get; private set; }
+        public virtual HttpRequest Request { get; private set; }
 
-        public HubCallerContext(IRequest request, string connectionId)
+        /// <summary>
+        /// This constructor is only intended to enable mocking of the class. Use of this constructor 
+        /// for other purposes may result in unexpected behavior.   
+        /// </summary>
+        protected HubCallerContext() { }
+
+        public HubCallerContext(HttpRequest request, string connectionId)
         {
             ConnectionId = connectionId;
             Request = request;

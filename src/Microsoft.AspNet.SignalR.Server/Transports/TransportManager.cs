@@ -5,8 +5,9 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
-using Microsoft.AspNet.SignalR.Hosting;
-using Microsoft.AspNet.SignalR.Http;
+using Microsoft.AspNet.Http;
+using Microsoft.Framework.DependencyInjection;
+using Microsoft.Framework.OptionsModel;
 
 namespace Microsoft.AspNet.SignalR.Transports
 {
@@ -15,26 +16,53 @@ namespace Microsoft.AspNet.SignalR.Transports
     /// </summary>
     public class TransportManager : ITransportManager
     {
-        private readonly ConcurrentDictionary<string, Func<HostContext, ITransport>> _transports = new ConcurrentDictionary<string, Func<HostContext, ITransport>>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, Func<HttpContext, ITransport>> _transports = new ConcurrentDictionary<string, Func<HttpContext, ITransport>>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Initializes a new instance of <see cref="TransportManager"/> class.
         /// </summary>
         /// <param name="serviceProvider">The default <see cref="IDependencyResolver"/>.</param>
         [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope", Justification = "Those are factory methods")]
-        public TransportManager(IServiceProvider serviceProvider)
+        public TransportManager(IServiceProvider serviceProvider,
+                                ITypeActivator typeActivator,
+                                IOptions<SignalROptions> optionsAccessor)
         {
             if (serviceProvider == null)
             {
                 throw new ArgumentNullException("serviceProvider");
             }
-            
-            // TODO: Use type activator here
+            if (typeActivator == null)
+            {
+                throw new ArgumentNullException("typeActivator");
+            }
+            if (optionsAccessor == null)
+            {
+                throw new ArgumentNullException("optionsAccessor");
+            }
 
-            Register("foreverFrame", context => new ForeverFrameTransport(context, serviceProvider));
-            Register("serverSentEvents", context => new ServerSentEventsTransport(context, serviceProvider));
-            Register("longPolling", context => new LongPollingTransport(context, serviceProvider));
-            Register("webSockets", context => new WebSocketTransport(context, serviceProvider));
+            var enabledTransports = optionsAccessor.Options.Transports.EnabledTransports;
+
+            if (enabledTransports.HasFlag(TransportType.WebSockets))
+            {
+                Register("webSockets", context => typeActivator.CreateInstance<WebSocketTransport>(serviceProvider, context));
+            }
+            if (enabledTransports.HasFlag(TransportType.ServerSentEvents))
+            {
+                Register("serverSentEvents", context => typeActivator.CreateInstance<ServerSentEventsTransport>(serviceProvider, context));
+            }
+            if (enabledTransports.HasFlag(TransportType.ForeverFrame))
+            {
+                Register("foreverFrame", context => typeActivator.CreateInstance<ForeverFrameTransport>(serviceProvider, context));
+            }
+            if (enabledTransports.HasFlag(TransportType.LongPolling))
+            {
+                Register("longPolling", context => typeActivator.CreateInstance<LongPollingTransport>(serviceProvider, context));
+            }
+
+            if (_transports.Count == 0)
+            {
+                throw new InvalidOperationException(Resources.Error_NoTransportsEnabled);
+            }
         }
 
         /// <summary>
@@ -42,7 +70,7 @@ namespace Microsoft.AspNet.SignalR.Transports
         /// </summary>
         /// <param name="transportName">The specified transport.</param>
         /// <param name="transportFactory">The factory method for the specified transport.</param>
-        public void Register(string transportName, Func<HostContext, ITransport> transportFactory)
+        public void Register(string transportName, Func<HttpContext, ITransport> transportFactory)
         {
             if (String.IsNullOrEmpty(transportName))
             {
@@ -68,33 +96,33 @@ namespace Microsoft.AspNet.SignalR.Transports
                 throw new ArgumentNullException("transportName");
             }
 
-            Func<HostContext, ITransport> removed;
+            Func<HttpContext, ITransport> removed;
             _transports.TryRemove(transportName, out removed);
         }
 
         /// <summary>
-        /// Gets the specified transport for the specified <see cref="HostContext"/>.
+        /// Gets the specified transport for the specified <see cref="HttpContext"/>.
         /// </summary>
-        /// <param name="hostContext">The <see cref="HostContext"/> for the current request.</param>
-        /// <returns>The <see cref="ITransport"/> for the specified <see cref="HostContext"/>.</returns>
-        public ITransport GetTransport(HostContext hostContext)
+        /// <param name="context">The <see cref="HttpContext"/> for the current request.</param>
+        /// <returns>The <see cref="ITransport"/> for the specified <see cref="HttpContext"/>.</returns>
+        public ITransport GetTransport(HttpContext context)
         {
-            if (hostContext == null)
+            if (context == null)
             {
-                throw new ArgumentNullException("hostContext");
+                throw new ArgumentNullException("context");
             }
 
-            string transportName = hostContext.Request.QueryString["transport"];
+            string transportName = context.Request.Query["transport"];
 
             if (String.IsNullOrEmpty(transportName))
             {
                 return null;
             }
 
-            Func<HostContext, ITransport> factory;
+            Func<HttpContext, ITransport> factory;
             if (_transports.TryGetValue(transportName, out factory))
             {
-                return factory(hostContext);
+                return factory(context);
             }
 
             return null;

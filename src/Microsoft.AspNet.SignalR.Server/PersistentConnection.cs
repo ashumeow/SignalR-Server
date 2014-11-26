@@ -11,14 +11,13 @@ using System.Threading.Tasks;
 using Microsoft.AspNet.Http;
 using Microsoft.AspNet.HttpFeature;
 using Microsoft.AspNet.SignalR.Configuration;
-using Microsoft.AspNet.SignalR.Hosting;
-using Microsoft.AspNet.SignalR.Http;
 using Microsoft.AspNet.SignalR.Infrastructure;
 using Microsoft.AspNet.SignalR.Json;
 using Microsoft.AspNet.SignalR.Messaging;
 using Microsoft.AspNet.SignalR.Transports;
 using Microsoft.Framework.DependencyInjection;
 using Microsoft.Framework.Logging;
+using Microsoft.Framework.OptionsModel;
 using Newtonsoft.Json;
 
 namespace Microsoft.AspNet.SignalR
@@ -29,29 +28,30 @@ namespace Microsoft.AspNet.SignalR
     public abstract class PersistentConnection
     {
         private const string WebSocketsTransportName = "webSockets";
+        private const string PingJsonPayload = "{ \"Response\": \"pong\" }";
+        private const string StartJsonPayload = "{ \"Response\": \"started\" }";
         private static readonly char[] SplitChars = new[] { ':' };
         private static readonly ProtocolResolver _protocolResolver = new ProtocolResolver();
 
-        private IConfigurationManager _configurationManager;
+        private SignalROptions _options;
         private ITransportManager _transportManager;
-        private IServerCommandHandler _serverMessageHandler;
 
         public virtual void Initialize(IServiceProvider serviceProvider)
         {
-            MessageBus = serviceProvider.GetService<IMessageBus>();
-            JsonSerializer = serviceProvider.GetService<JsonSerializer>();
-            LoggerFactory = serviceProvider.GetService<ILoggerFactory>();
-            Counters = serviceProvider.GetService<IPerformanceCounterManager>();
-            AckHandler = serviceProvider.GetService<IAckHandler>();
-            ProtectedData = serviceProvider.GetService<IProtectedData>();
-            UserIdProvider = serviceProvider.GetService<IUserIdProvider>();
+            MessageBus = serviceProvider.GetRequiredService<IMessageBus>();
+            JsonSerializer = serviceProvider.GetRequiredService<JsonSerializer>();
+            LoggerFactory = serviceProvider.GetRequiredService<ILoggerFactory>();
+            Counters = serviceProvider.GetRequiredService<IPerformanceCounterManager>();
+            AckHandler = serviceProvider.GetRequiredService<IAckHandler>();
+            ProtectedData = serviceProvider.GetRequiredService<IProtectedData>();
+            UserIdProvider = serviceProvider.GetRequiredService<IUserIdProvider>();
+            Pool = serviceProvider.GetRequiredService<IMemoryPool>();
 
-            _configurationManager = serviceProvider.GetService<IConfigurationManager>();
-            _transportManager = serviceProvider.GetService<ITransportManager>();
-            _serverMessageHandler = serviceProvider.GetService<IServerCommandHandler>();
+            _options = serviceProvider.GetRequiredService<IOptions<SignalROptions>>().Options;
+            _transportManager = serviceProvider.GetRequiredService<ITransportManager>();
         }
 
-        public bool Authorize(IRequest request)
+        public bool Authorize(HttpRequest request)
         {
             return AuthorizeRequest(request);
         }
@@ -79,6 +79,8 @@ namespace Microsoft.AspNet.SignalR
         protected ITransport Transport { get; private set; }
 
         protected IUserIdProvider UserIdProvider { get; private set; }
+
+        protected IMemoryPool Pool { get; set; }
 
         /// <summary>
         /// Gets the <see cref="IConnection"/> for the <see cref="PersistentConnection"/>.
@@ -127,31 +129,25 @@ namespace Microsoft.AspNet.SignalR
         /// </summary>
         /// <param name="environment"></param>
         /// <returns></returns>
-        public Task ProcessRequest(HttpContext httpContext)
+        public Task ProcessRequest(HttpContext context)
         {
-            // Disable request compression and buffering on IIS
-            var buffering = httpContext.GetFeature<IHttpBufferingFeature>();
-            if (buffering != null)
+            if (context == null)
             {
-                buffering.DisableRequestBuffering();
-                buffering.DisableResponseBuffering();
+                throw new ArgumentNullException("context");
             }
-
-            // TODO: Reconcile HttpContext and HostContext
-            var context = new HostContext(httpContext);
 
             var response = context.Response;
 
             // Add the nosniff header for all responses to prevent IE from trying to sniff mime type from contents
-            httpContext.Response.Headers.Set("X-Content-Type-Options", "nosniff");
+            context.Response.Headers.Set("X-Content-Type-Options", "nosniff");
 
-            if (Authorize(context.Request))
+            if (AuthorizeRequest(context.Request))
             {
-                return ProcessRequest(context);
+                return ProcessRequestCore(context);
             }
 
-            if (context.Request.User != null &&
-                context.Request.User.Identity.IsAuthenticated)
+            if (context.User != null &&
+                context.User.Identity.IsAuthenticated)
             {
                 // If the user is authenticated and authorize failed then 403
                 response.StatusCode = 403;
@@ -168,14 +164,13 @@ namespace Microsoft.AspNet.SignalR
         /// <summary>
         /// Handles all requests for <see cref="PersistentConnection"/>s.
         /// </summary>
-        /// <param name="context">The <see cref="HostContext"/> for the current request.</param>
+        /// <param name="context">The <see cref="HttpContext"/> for the current request.</param>
         /// <returns>A <see cref="Task"/> that completes when the <see cref="PersistentConnection"/> pipeline is complete.</returns>
         /// <exception cref="T:System.InvalidOperationException">
-        /// Thrown if connection wasn't initialized.
         /// Thrown if the transport wasn't specified.
         /// Thrown if the connection id wasn't specified.
         /// </exception>
-        public virtual Task ProcessRequest(HostContext context)
+        public virtual async Task ProcessRequestCore(HttpContext context)
         {
             if (context == null)
             {
@@ -184,26 +179,30 @@ namespace Microsoft.AspNet.SignalR
 
             if (IsNegotiationRequest(context.Request))
             {
-                return ProcessNegotiationRequest(context);
+                await ProcessNegotiationRequest(context).PreserveCulture();
+                return;
             }
             else if (IsPingRequest(context.Request))
             {
-                return ProcessPingRequest(context);
+                await ProcessPingRequest(context).PreserveCulture();
+                return;
             }
 
             Transport = GetTransport(context);
 
             if (Transport == null)
             {
-                return FailResponse(context.Response, String.Format(CultureInfo.CurrentCulture, Resources.Error_ProtocolErrorUnknownTransport));
+                await FailResponse(context.Response, String.Format(CultureInfo.CurrentCulture, Resources.Error_ProtocolErrorUnknownTransport)).PreserveCulture();
+                return;
             }
 
-            string connectionToken = context.Request.QueryString["connectionToken"];
+            string connectionToken = context.Request.Query["connectionToken"];
 
             // If there's no connection id then this is a bad request
             if (String.IsNullOrEmpty(connectionToken))
             {
-                return FailResponse(context.Response, String.Format(CultureInfo.CurrentCulture, Resources.Error_ProtocolErrorMissingConnectionToken));
+                await FailResponse(context.Response, String.Format(CultureInfo.CurrentCulture, Resources.Error_ProtocolErrorMissingConnectionToken)).PreserveCulture();
+                return;
             }
 
             string connectionId;
@@ -212,7 +211,8 @@ namespace Microsoft.AspNet.SignalR
 
             if (!TryGetConnectionId(context, connectionToken, out connectionId, out message, out statusCode))
             {
-                return FailResponse(context.Response, message, statusCode);
+                await FailResponse(context.Response, message, statusCode).PreserveCulture();
+                return;
             }
 
             // Set the transport's connection id to the unprotected one
@@ -221,8 +221,11 @@ namespace Microsoft.AspNet.SignalR
             // Get the user id from the request
             string userId = UserIdProvider.GetUserId(context.Request);
 
+            // Get the groups oken from the request
+            string groupsToken = await Transport.GetGroupsToken().PreserveCulture();
+
             IList<string> signals = GetSignals(userId, connectionId);
-            IList<string> groups = AppendGroupPrefixes(context, connectionId);
+            IList<string> groups = AppendGroupPrefixes(context, connectionId, groupsToken);
 
             Connection connection = CreateConnection(connectionId, signals, groups);
 
@@ -230,16 +233,13 @@ namespace Microsoft.AspNet.SignalR
             string groupName = PrefixHelper.GetPersistentConnectionGroupName(DefaultSignalRaw);
             Groups = new GroupManager(connection, groupName);
 
-            Transport.TransportConnected = () =>
+            // We handle /start requests after the PersistentConnection has been initialized,
+            // because ProcessStartRequest calls OnConnected.
+            if (IsStartRequest(context.Request))
             {
-                var command = new ServerCommand
-                {
-                    ServerCommandType = ServerCommandType.RemoveConnection,
-                    Value = connectionId
-                };
-
-                return _serverMessageHandler.SendCommand(command);
-            };
+                await ProcessStartRequest(context, connectionId).PreserveCulture();
+                return;
+            }
 
             Transport.Connected = () =>
             {
@@ -258,16 +258,16 @@ namespace Microsoft.AspNet.SignalR
                 return TaskAsyncHelper.FromMethod(() => OnReceived(context.Request, connectionId, data).OrEmpty());
             };
 
-            Transport.Disconnected = () =>
+            Transport.Disconnected = clean =>
             {
-                return TaskAsyncHelper.FromMethod(() => OnDisconnected(context.Request, connectionId).OrEmpty());
+                return TaskAsyncHelper.FromMethod(() => OnDisconnected(context.Request, connectionId, stopCalled: clean).OrEmpty());
             };
 
-            return Transport.ProcessRequest(connection).OrEmpty().Catch(Counters.ErrorsAllTotal, Counters.ErrorsAllPerSec);
+            await Transport.ProcessRequest(connection).OrEmpty().Catch(Logger, Counters.ErrorsAllTotal, Counters.ErrorsAllPerSec).PreserveCulture();
         }
 
         [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "We want to catch any exception when unprotecting data.")]
-        internal bool TryGetConnectionId(HostContext context,
+        internal bool TryGetConnectionId(HttpContext context,
                                          string connectionToken,
                                          out string connectionId,
                                          out string message,
@@ -314,10 +314,8 @@ namespace Microsoft.AspNet.SignalR
         }
 
         [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "We want to prevent any failures in unprotecting")]
-        internal IList<string> VerifyGroups(HostContext context, string connectionId)
+        internal IList<string> VerifyGroups(string connectionId, string groupsToken)
         {
-            string groupsToken = context.Request.QueryString["groupsToken"];
-
             if (String.IsNullOrEmpty(groupsToken))
             {
                 return ListHelper<string>.Empty;
@@ -352,9 +350,9 @@ namespace Microsoft.AspNet.SignalR
             return JsonSerializer.Parse<string[]>(groupsValue);
         }
 
-        private IList<string> AppendGroupPrefixes(HostContext context, string connectionId)
+        private IList<string> AppendGroupPrefixes(HttpContext context, string connectionId, string groupsToken)
         {
-            return (from g in OnRejoiningGroups(context.Request, VerifyGroups(context, connectionId), connectionId)
+            return (from g in OnRejoiningGroups(context.Request, VerifyGroups(connectionId, groupsToken), connectionId)
                     select GroupPrefix + g).ToList();
         }
 
@@ -369,7 +367,8 @@ namespace Microsoft.AspNet.SignalR
                                   LoggerFactory,
                                   AckHandler,
                                   Counters,
-                                  ProtectedData);
+                                  ProtectedData,
+                                  Pool);
         }
 
         [SuppressMessage("Microsoft.Usage", "CA1801:ReviewUnusedParameters", MessageId = "userId", Justification = "This method is virtual and is used in the derived class")]
@@ -401,9 +400,9 @@ namespace Microsoft.AspNet.SignalR
         /// <summary>
         /// Called before every request and gives the user a authorize the user.
         /// </summary>
-        /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
+        /// <param name="request">The <see cref="HttpRequest"/> for the current connection.</param>
         /// <returns>A boolean value that represents if the request is authorized.</returns>
-        protected virtual bool AuthorizeRequest(IRequest request)
+        protected virtual bool AuthorizeRequest(HttpRequest request)
         {
             return true;
         }
@@ -411,11 +410,11 @@ namespace Microsoft.AspNet.SignalR
         /// <summary>
         /// Called when a connection reconnects after a timeout to determine which groups should be rejoined.
         /// </summary>
-        /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
+        /// <param name="request">The <see cref="HttpRequest"/> for the current connection.</param>
         /// <param name="groups">The groups the calling connection claims to be part of.</param>
         /// <param name="connectionId">The id of the reconnecting client.</param>
         /// <returns>A collection of group names that should be joined on reconnect</returns>
-        protected virtual IList<string> OnRejoiningGroups(IRequest request, IList<string> groups, string connectionId)
+        protected virtual IList<string> OnRejoiningGroups(HttpRequest request, IList<string> groups, string connectionId)
         {
             return groups;
         }
@@ -423,10 +422,10 @@ namespace Microsoft.AspNet.SignalR
         /// <summary>
         /// Called when a new connection is made.
         /// </summary>
-        /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
+        /// <param name="request">The <see cref="HttpRequest"/> for the current connection.</param>
         /// <param name="connectionId">The id of the connecting client.</param>
         /// <returns>A <see cref="Task"/> that completes when the connect operation is complete.</returns>
-        protected virtual Task OnConnected(IRequest request, string connectionId)
+        protected virtual Task OnConnected(HttpRequest request, string connectionId)
         {
             return TaskAsyncHelper.Empty;
         }
@@ -434,10 +433,10 @@ namespace Microsoft.AspNet.SignalR
         /// <summary>
         /// Called when a connection reconnects after a timeout.
         /// </summary>
-        /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
+        /// <param name="request">The <see cref="HttpRequest"/> for the current connection.</param>
         /// <param name="connectionId">The id of the re-connecting client.</param>
         /// <returns>A <see cref="Task"/> that completes when the re-connect operation is complete.</returns>
-        protected virtual Task OnReconnected(IRequest request, string connectionId)
+        protected virtual Task OnReconnected(HttpRequest request, string connectionId)
         {
             return TaskAsyncHelper.Empty;
         }
@@ -445,106 +444,116 @@ namespace Microsoft.AspNet.SignalR
         /// <summary>
         /// Called when data is received from a connection.
         /// </summary>
-        /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
+        /// <param name="request">The <see cref="HttpRequest"/> for the current connection.</param>
         /// <param name="connectionId">The id of the connection sending the data.</param>
         /// <param name="data">The payload sent to the connection.</param>
         /// <returns>A <see cref="Task"/> that completes when the receive operation is complete.</returns>
-        protected virtual Task OnReceived(IRequest request, string connectionId, string data)
+        protected virtual Task OnReceived(HttpRequest request, string connectionId, string data)
         {
             return TaskAsyncHelper.Empty;
         }
 
         /// <summary>
-        /// Called when a connection disconnects.
+        /// Called when a connection disconnects gracefully or due to a timeout.
         /// </summary>
-        /// <param name="request">The <see cref="IRequest"/> for the current connection.</param>
+        /// <param name="request">The <see cref="HttpRequest"/> for the current connection.</param>
         /// <param name="connectionId">The id of the disconnected connection.</param>
+        /// <param name="stopCalled">
+        /// true, if stop was called on the client closing the connection gracefully;
+        /// false, if the connection has been lost for longer than the
+        /// <see cref="Configuration.IConfigurationManager.DisconnectTimeout"/>.
+        /// Timeouts can occur in scaleout when clients reconnect with another server.
+        /// </param>
         /// <returns>A <see cref="Task"/> that completes when the disconnect operation is complete.</returns>
-        protected virtual Task OnDisconnected(IRequest request, string connectionId)
+        protected virtual Task OnDisconnected(HttpRequest request, string connectionId, bool stopCalled)
         {
             return TaskAsyncHelper.Empty;
         }
 
-        private Task ProcessPingRequest(HostContext context)
+        private static Task ProcessPingRequest(HttpContext context)
         {
-            var payload = new
-            {
-                Response = "pong"
-            };
-
-            if (!String.IsNullOrEmpty(context.Request.QueryString["callback"]))
-            {
-                return ProcessJsonpRequest(context, payload);
-            }
-
-            context.Response.ContentType = JsonUtility.JsonMimeType;
-            return context.Response.End(JsonSerializer.Stringify(payload));
+            return SendJsonResponse(context, PingJsonPayload);
         }
 
-        private Task ProcessNegotiationRequest(HostContext context)
+        private Task ProcessNegotiationRequest(HttpContext context)
         {
             // Total amount of time without a keep alive before the client should attempt to reconnect in seconds.
-            var keepAliveTimeout = _configurationManager.KeepAliveTimeout();
+            var keepAliveTimeout = _options.Transports.KeepAliveTimeout();
             string connectionId = Guid.NewGuid().ToString("d");
             string connectionToken = connectionId + ':' + GetUserIdentity(context);
 
             var payload = new
             {
-                Url = context.Request.LocalPath.Replace("/negotiate", ""),
+                Url = context.Request.LocalPath().Replace("/negotiate", ""),
                 ConnectionToken = ProtectedData.Protect(connectionToken, Purposes.ConnectionToken),
                 ConnectionId = connectionId,
                 KeepAliveTimeout = keepAliveTimeout != null ? keepAliveTimeout.Value.TotalSeconds : (double?)null,
-                DisconnectTimeout = _configurationManager.DisconnectTimeout.TotalSeconds,
+                DisconnectTimeout = _options.Transports.DisconnectTimeout.TotalSeconds,
+                ConnectionTimeout = _options.Transports.LongPolling.PollTimeout.TotalSeconds,
                 // TODO: Supports websockets
-                // TryWebSockets = _transportManager.SupportsTransport(WebSocketsTransportName) && context.Environment.SupportsWebSockets(),
-                TryWebSockets = false,
+                TryWebSockets = _transportManager.SupportsTransport(WebSocketsTransportName) && context.GetFeature<IHttpWebSocketFeature>() != null,
                 ProtocolVersion = _protocolResolver.Resolve(context.Request).ToString(),
-                TransportConnectTimeout = _configurationManager.TransportConnectTimeout.TotalSeconds
+                TransportConnectTimeout = _options.Transports.TransportConnectTimeout.TotalSeconds,
+                LongPollDelay = _options.Transports.LongPolling.PollDelay.TotalSeconds
             };
 
-            if (!String.IsNullOrEmpty(context.Request.QueryString["callback"]))
-            {
-                return ProcessJsonpRequest(context, payload);
-            }
-
-            context.Response.ContentType = JsonUtility.JsonMimeType;
-            return context.Response.End(JsonSerializer.Stringify(payload));
+            return SendJsonResponse(context, JsonSerializer.Stringify(payload));
         }
 
-        private static string GetUserIdentity(HostContext context)
+        private async Task ProcessStartRequest(HttpContext context, string connectionId)
         {
-            if (context.Request.User != null && context.Request.User.Identity.IsAuthenticated)
+            await OnConnected(context.Request, connectionId).OrEmpty().PreserveCulture();
+            await SendJsonResponse(context, StartJsonPayload).PreserveCulture();
+            Counters.ConnectionsConnected.Increment();
+        }
+
+        private static Task SendJsonResponse(HttpContext context, string jsonPayload)
+        {
+            var callback = context.Request.Query["callback"];
+            if (String.IsNullOrEmpty(callback))
             {
-                return context.Request.User.Identity.Name ?? String.Empty;
+                // Send normal JSON response
+                context.Response.ContentType = JsonUtility.JsonMimeType;
+                return context.Response.End(jsonPayload);
+            }
+
+            // Send JSONP response since a callback is specified by the query string
+            var callbackInvocation = JsonUtility.CreateJsonpCallback(callback, jsonPayload);
+            context.Response.ContentType = JsonUtility.JavaScriptMimeType;
+            return context.Response.End(callbackInvocation);
+        }
+
+        private static string GetUserIdentity(HttpContext context)
+        {
+            if (context.User != null && context.User.Identity.IsAuthenticated)
+            {
+                return context.User.Identity.Name ?? String.Empty;
             }
             return String.Empty;
         }
 
-        private Task ProcessJsonpRequest(HostContext context, object payload)
-        {
-            context.Response.ContentType = JsonUtility.JavaScriptMimeType;
-            var data = JsonUtility.CreateJsonpCallback(context.Request.QueryString["callback"], JsonSerializer.Stringify(payload));
-
-            return context.Response.End(data);
-        }
-
-        private static Task FailResponse(IResponse response, string message, int statusCode = 400)
+        private static Task FailResponse(HttpResponse response, string message, int statusCode = 400)
         {
             response.StatusCode = statusCode;
             return response.End(message);
         }
 
-        private static bool IsNegotiationRequest(IRequest request)
+        private static bool IsNegotiationRequest(HttpRequest request)
         {
-            return request.LocalPath.EndsWith("/negotiate", StringComparison.OrdinalIgnoreCase);
+            return request.LocalPath().EndsWith("/negotiate", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool IsPingRequest(IRequest request)
+        private static bool IsStartRequest(HttpRequest request)
         {
-            return request.LocalPath.EndsWith("/ping", StringComparison.OrdinalIgnoreCase);
+            return request.LocalPath().EndsWith("/start", StringComparison.OrdinalIgnoreCase);
         }
 
-        private ITransport GetTransport(HostContext context)
+        private static bool IsPingRequest(HttpRequest request)
+        {
+            return request.LocalPath().EndsWith("/ping", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private ITransport GetTransport(HttpContext context)
         {
             return _transportManager.GetTransport(context);
         }

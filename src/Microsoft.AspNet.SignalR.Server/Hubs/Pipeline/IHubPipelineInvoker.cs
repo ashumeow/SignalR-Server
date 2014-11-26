@@ -4,6 +4,7 @@
 
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.AspNet.Http;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
@@ -46,7 +47,11 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// was connected to. By default, this results in the <see cref="IHub"/>'s OnDisconnected method being invoked.
         /// </summary>
         /// <param name="hub">A <see cref="IHub"/> the client was disconnected from.</param>
-        Task Disconnect(IHub hub);
+        /// <param name="stopCalled">
+        /// true, if stop was called on the client closing the connection gracefully;
+        /// false, if the client timed out. Timeouts can be caused by clients reconnecting to another SignalR server in scaleout.
+        /// </param>
+        Task Disconnect(IHub hub, bool stopCalled);
 
         /// <summary>
         /// To be called before a client subscribes to signals belonging to the hub described by the <see cref="HubDescriptor"/>.
@@ -55,11 +60,11 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// </summary>
         /// <param name="hubDescriptor">A description of the hub the client is attempting to connect to.</param>
         /// <param name="request">
-        /// The connect request being made by the client which should include the client's
-        /// <see cref="System.Security.Principal.IPrincipal"/> User.
+        /// The connect request being made by the client which references the client's
+        /// <see cref="System.Security.Principal.IPrincipal"/> via <see cref="HttpRequest.HttpContext.User"/>.
         /// </param>
         /// <returns>true, if the client is authorized to subscribe to client-side hub method invocations; false, otherwise.</returns>
-        bool AuthorizeConnect(HubDescriptor hubDescriptor, IRequest request);
+        bool AuthorizeConnect(HubDescriptor hubDescriptor, HttpRequest request);
 
         /// <summary>
         /// This method determines which of the groups belonging to the hub described by the <see cref="HubDescriptor"/> the client should be
@@ -68,11 +73,11 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// because untrusted clients may claim to be a member of groups they were never authorized to join.
         /// </summary>
         /// <param name="hubDescriptor">A description of the hub for which the client is attempting to rejoin groups.</param>
-        /// <param name="request">The reconnect request being made by the client that is attempting to rejoin groups.</param>
+        /// <param name="request">The reconnect request made by the client that is attempting to rejoin groups.</param>
         /// <param name="groups">
         /// The list of groups belonging to the relevant hub that the client claims to have been a member of before the reconnect.
         /// </param>
         /// <returns>A list of groups the client is allowed to rejoin.</returns>
-        IList<string> RejoiningGroups(HubDescriptor hubDescriptor, IRequest request, IList<string> groups);
+        IList<string> RejoiningGroups(HubDescriptor hubDescriptor, HttpRequest request, IList<string> groups);
     }
 }

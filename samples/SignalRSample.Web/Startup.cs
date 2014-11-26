@@ -1,28 +1,24 @@
 ﻿using Microsoft.AspNet.Builder;
-using Microsoft.AspNet.SignalR;
 using Microsoft.Framework.DependencyInjection;
 
 namespace SignalRSample.Web
 {
     public class Startup
     {
-        public void Configure(IBuilder app)
+        public void Configure(IApplicationBuilder app)
         {
             app.UseServices(services =>
             {
-                services.AddSignalR();
+                services.AddSignalR(options =>
+                {
+                    options.Hubs.EnableDetailedErrors = true;
+                });
             });
 
-            app.UseStaticFiles();
-            app.UseSignalR();
-        }
-    }
+            app.UseFileServer();
 
-    public class Chat : Hub
-    {
-        public void Send(string message)
-        {
-            Clients.All.send(message);
+            app.UseSignalR<RawConnection>("/raw-connection");
+            app.UseSignalR();
         }
     }
 }
