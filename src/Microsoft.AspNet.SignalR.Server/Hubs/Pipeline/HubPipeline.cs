@@ -4,32 +4,20 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNet.Http;
+using Microsoft.Framework.OptionsModel;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
-    internal class HubPipeline : IHubPipeline, IHubPipelineInvoker
+    internal class HubPipeline : IHubPipelineInvoker
     {
-        private readonly Stack<IHubPipelineModule> _modules;
         private readonly Lazy<ComposedPipeline> _pipeline;
 
-        public HubPipeline()
+        public HubPipeline(IOptions<SignalROptions> options)
         {
-            _modules = new Stack<IHubPipelineModule>();
-            _pipeline = new Lazy<ComposedPipeline>(() => new ComposedPipeline(_modules));
-        }
-
-        public IHubPipeline AddModule(IHubPipelineModule pipelineModule)
-        {
-            if (_pipeline.IsValueCreated)
-            {
-                throw new InvalidOperationException(String.Format(CultureInfo.CurrentCulture, Resources.Error_UnableToAddModulePiplineAlreadyInvoked));
-            }
-            _modules.Push(pipelineModule);
-            return this;
+            _pipeline = new Lazy<ComposedPipeline>(() => new ComposedPipeline(options.Options.Hubs.PipelineModules));
         }
 
         private ComposedPipeline Pipeline
@@ -74,7 +62,6 @@ namespace Microsoft.AspNet.SignalR.Hubs
 
         private class ComposedPipeline
         {
-
             public Func<IHubIncomingInvokerContext, Task<object>> Invoke;
             public Func<IHub, Task> Connect;
             public Func<IHub, Task> Reconnect;
@@ -83,7 +70,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
             public Func<HubDescriptor, HttpRequest, IList<string>, IList<string>> RejoiningGroups;
             public Func<IHubOutgoingInvokerContext, Task> Send;
 
-            public ComposedPipeline(Stack<IHubPipelineModule> modules)
+            public ComposedPipeline(IEnumerable<IHubPipelineModule> modules)
             {
                 // This wouldn't look nearly as gnarly if C# had better type inference, but now we don't need the ComposedModule or PassThroughModule.
                 Invoke = Compose<Func<IHubIncomingInvokerContext, Task<object>>>(modules, (m, f) => m.BuildIncoming(f))(HubDispatcher.Incoming);
