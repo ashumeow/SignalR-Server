@@ -28,14 +28,14 @@ namespace Microsoft.AspNet.SignalR.Transports
         protected ForeverTransport(HttpContext context,
                                    JsonSerializer jsonSerializer,
                                    ITransportHeartbeat heartbeat,
-                                   IPerformanceCounterManager performanceCounterWriter,
+                                   IPerformanceCounterManager performanceCounterManager,
                                    IApplicationLifetime applicationLifetime,
                                    ILoggerFactory loggerFactory,
                                    IMemoryPool pool)
-            : base(context, heartbeat, performanceCounterWriter, applicationLifetime, loggerFactory, pool)
+            : base(context, heartbeat, performanceCounterManager, applicationLifetime, loggerFactory, pool)
         {
             _jsonSerializer = jsonSerializer;
-            _counters = performanceCounterWriter;
+            _counters = performanceCounterManager;
         }
 
         protected virtual int MaxMessages
@@ -130,7 +130,7 @@ namespace Microsoft.AspNet.SignalR.Transports
 
         protected virtual async Task ProcessSendRequest()
         {
-            IReadableStringCollection form = await Context.Request.GetFormAsync().PreserveCulture();
+            IReadableStringCollection form = await Context.Request.ReadFormAsync().PreserveCulture();
             string data = form["data"];
 
             if (Received != null)

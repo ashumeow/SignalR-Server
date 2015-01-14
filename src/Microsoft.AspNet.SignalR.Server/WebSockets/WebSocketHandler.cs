@@ -3,7 +3,6 @@
 
 
 using System;
-using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -204,23 +203,7 @@ namespace Microsoft.AspNet.SignalR.WebSockets
                 }
             }
 
-            try
-            {
-                if (WebSocket.State == WebSocketState.Closed ||
-                    WebSocket.State == WebSocketState.Aborted)
-                {
-                    // No-op if the socket is already closed or aborted
-                }
-                else
-                {
-                    // Close the socket
-                    await WebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None).PreserveCulture();
-                }
-            }
-            finally
-            {
-                OnClose();
-            }
+            OnClose();
         }
 
         // returns true if this is a fatal exception (e.g. OnError should be called)
